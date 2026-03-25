@@ -1,0 +1,24 @@
+# Rust build artifacts
+target/
+build/
+
+# Compiled binaries
+hello
+*.exe
+*.out
+
+# Intermediate compilation files
+*.ll
+*.s
+*.mir
+*.ast
+*.hir
+*.expanded.rs
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+*.swp
+*.swo
