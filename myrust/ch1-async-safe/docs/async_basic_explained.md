@@ -9,16 +9,16 @@
 
 ### 直接回答：Rust async/await = **无栈协程 (Stackless Coroutine) + 异步IO**
 
-| 维度 | C++ | Go | Erlang | Rust |
-|------|-----|----|--------|------|
-| **并发模型** | OS 线程 / C++20 协程 | goroutine (有栈协程) | 轻量级进程 (Actor) | 无栈协程 (Future) |
-| **调度器** | OS 内核调度 | Go runtime (GMP 调度器) | BEAM VM 调度器 | tokio runtime (用户态调度) |
-| **栈** | 每线程 ~8MB 栈 | 初始 2KB，可动态增长到 1GB | 每进程 ~2KB 堆栈 | **无栈**，状态编译为状态机 |
-| **切换开销** | ~1-10μs (内核态切换) | ~100-200ns (用户态) | ~0.1-1μs (VM 调度) | **~10-50ns** (纯用户态，无系统调用) |
-| **可创建数量** | ~千级 (受内存限制) | ~十万到百万级 | ~百万级 | **~百万级** |
-| **IO 模型** | 阻塞IO / epoll 手动管理 | netpoller (自动异步化) | 内置异步IO | 基于 epoll/kqueue 的异步IO |
-| **挂起方式** | 手动 / co_await | **隐式**（runtime 自动） | 隐式（VM 自动） | **显式**（必须写 .await） |
-| **函数染色** | 有 (co_await) | **无** ✅ | 无 | 有 (async/await) |
+| 维度 | C++ | Go | Erlang | **GNU Pth** | **TypeScript** | Rust |
+|------|-----|----|--------|-------------|----------------|------|
+| **并发模型** | OS 线程 / C++20 协程 | goroutine (有栈协程) | 轻量级进程 (Actor) | **用户态有栈协程** | 无栈协程 (Promise) | 无栈协程 (Future) |
+| **调度器** | OS 内核调度 | Go runtime (GMP 调度器) | BEAM VM 调度器 | **Pth 用户态调度器** | **事件循环 (Event Loop)** | tokio runtime (用户态调度) |
+| **栈** | 每线程 ~8MB 栈 | 初始 2KB，可动态增长到 1GB | 每进程 ~2KB 堆栈 | **每协程 64KB 默认栈** | **无栈**，状态机/闭包链 | **无栈**，状态编译为状态机 |
+| **切换开销** | ~1-10μs (内核态切换) | ~100-200ns (用户态) | ~0.1-1μs (VM 调度) | **~200-500ns (ucontext)** | **~50-100ns (微任务队列)** | **~10-50ns** (纯用户态，无系统调用) |
+| **可创建数量** | ~千级 (受内存限制) | ~十万到百万级 | ~百万级 | **~万级 (受栈内存限制)** | **~百万级 (Promise 很轻)** | **~百万级** |
+| **IO 模型** | 阻塞IO / epoll 手动管理 | netpoller (自动异步化) | 内置异步IO | **替换系统调用为非阻塞** | **libuv/浏览器异步IO** | 基于 epoll/kqueue 的异步IO |
+| **挂起方式** | 手动 / co_await | **隐式**（runtime 自动） | 隐式（VM 自动） | **显式 (pth_yield)** | **显式 (await)** | **显式**（必须写 .await） |
+| **函数染色** | 有 (co_await) | **无** ✅ | 无 | **无** ✅ | **有** (async/await) | 有 (async/await) |
 
 ### 深入理解
 
@@ -767,3 +767,804 @@ async fn main() {
 | 团队大、水平参差 | Go ✅ | 语言简单，不容易写出"天书" |
 | 延迟敏感（交易系统） | Rust ✅ | 确定性延迟，无 GC 停顿 |
 | CLI 工具 | 都行 | Go 编译快，Rust 二进制更小 |
+
+---
+
+## 五、`.await` 与操作系统调度原语的对比
+
+### 5.1 核心类比：`.await` = 协作式调度中的"让出点"
+
+操作系统有两种经典的调度模型：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              操作系统的两种调度模型                                │
+├──────────────────────┬──────────────────────────────────────────┤
+│   抢占式 (Preemptive) │   协作式 (Cooperative)                   │
+├──────────────────────┼──────────────────────────────────────────┤
+│ 内核态进程/线程       │   用户态协程                              │
+│ OS 定时器中断强制切换  │   程序自己决定何时让出                     │
+│ 进程不需要配合        │   必须显式调用 yield / .await              │
+│ 一个死循环不影响其他   │   一个死循环会饿死所有其他任务              │
+│ 代表：Linux线程调度    │   代表：Rust async, Go (部分), Win3.1     │
+└──────────────────────┴──────────────────────────────────────────┘
+```
+
+**Rust 的 `.await` 本质上就是一个显式的让出点 (yield point)**，类似于用户态协作式调度中的 `yield()`。但它比简单的 yield 更智能——它同时告诉调度器"我在等什么"以及"好了怎么叫我"。
+
+### 5.2 精确的对应关系
+
+```
+操作系统原语                          Rust async
+─────────────────────────────────────────────────────
+进程/线程                     ←→      Future (async task)
+进程控制块 PCB                ←→      状态机结构体 (编译器生成的 enum)
+CPU 时间片                    ←→      一次 poll() 调用
+上下文切换 (context switch)   ←→      poll() 返回 Pending → 调度器选下一个任务
+调度器 (scheduler)            ←→      tokio runtime / executor
+yield() / sched_yield()      ←→      .await
+就绪队列 (ready queue)        ←→      tokio 的任务队列
+阻塞等待 I/O                  ←→      返回 Poll::Pending + 注册 Waker
+I/O 完成中断                  ←→      Waker::wake() 把任务放回就绪队列
+```
+
+### 5.3 用代码对照理解
+
+```rust
+async fn fetch_data(id: u32) -> String {
+    println!("  [Task {}] Starting fetch...", id);
+    // ↓ 这一行就是"让出 CPU"的点
+    // 相当于：我要等 I/O，把 CPU 让给别人
+    sleep(Duration::from_millis(100 * id as u64)).await;
+    //                                           ^^^^^
+    //  1. 检查 sleep 是否完成
+    //  2. 没完成 → 返回 Pending（让出控制权给调度器）
+    //  3. 调度器去执行其他就绪的 Future
+    //  4. sleep 时间到 → Waker 通知调度器 → 重新 poll 这个 Future
+    //  5. 完成 → 继续执行下面的代码
+    println!("  [Task {}] Fetch complete!", id);
+    format!("Data from task {}", id)
+}
+```
+
+翻译成操作系统的语言（伪代码）：
+
+```c
+// 等价的操作系统进程行为
+void fetch_data(int id) {
+    printf("[Task %d] Starting fetch...\n", id);
+
+    // 发起异步 I/O，然后让出 CPU
+    async_io_request(sleep_timer, 100 * id);
+    yield_to_scheduler();  // ← 这就是 .await 做的事
+    // ↑ 进程状态变为 BLOCKED/WAITING
+    // 调度器切换到其他 READY 的进程
+    // I/O 完成后，中断处理程序把进程状态改为 READY
+    // 调度器重新调度到这里，从这行之后继续执行
+
+    printf("[Task %d] Fetch complete!\n", id);
+}
+```
+
+### 5.4 状态转换对比
+
+操作系统进程和 Rust Future 的状态转换几乎一一对应：
+
+```
+操作系统进程状态：
+  RUNNING ──(I/O请求)──→ BLOCKED ──(I/O完成中断)──→ READY ──(调度)──→ RUNNING
+
+Rust Future 状态：
+  被 poll() ──(.await遇到未完成)──→ Pending ──(Waker::wake())──→ 被再次 poll()
+              返回 Pending                     放入就绪队列        返回 Ready(值)
+```
+
+用流程图表示：
+
+```
+                    ┌──────────────────────────────────────────────┐
+                    │           操作系统进程调度                     │
+                    │                                              │
+                    │   ┌─────────┐  I/O请求   ┌─────────┐        │
+                    │   │ RUNNING │──────────→│ BLOCKED │        │
+                    │   └────↑────┘            └────┬────┘        │
+                    │        │                      │              │
+                    │     调度选中              I/O完成中断         │
+                    │        │                      │              │
+                    │   ┌────┴────┐            ┌────↓────┐        │
+                    │   │  READY  │←───────────│  READY  │        │
+                    │   └─────────┘  放入就绪队列 └─────────┘        │
+                    └──────────────────────────────────────────────┘
+
+                    ┌──────────────────────────────────────────────┐
+                    │           Rust Future 调度                    │
+                    │                                              │
+                    │   ┌─────────┐  返回Pending  ┌─────────┐     │
+                    │   │ poll()  │──────────────→│ Pending │     │
+                    │   │ 执行中  │               │ (挂起)  │     │
+                    │   └────↑────┘               └────┬────┘     │
+                    │        │                         │           │
+                    │    调度器再次poll            Waker::wake()   │
+                    │        │                         │           │
+                    │   ┌────┴────┐               ┌────↓────┐     │
+                    │   │  就绪   │←──────────────│  就绪   │     │
+                    │   │ 队列中  │  放入就绪队列   │ 队列中  │     │
+                    │   └─────────┘               └─────────┘     │
+                    └──────────────────────────────────────────────┘
+```
+
+### 5.5 `.await` ≠ 简单的 `yield()`
+
+虽然类比成立，但有一个重要区别：
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  操作系统的 yield() / sched_yield()：                         │
+│    "我现在没事干，CPU 给别人用吧"                               │
+│    → 进程还在就绪队列，随时可能被调度回来                        │
+│    → 类似于"我不忙，你先用"                                    │
+│                                                              │
+│  Rust 的 .await：                                            │
+│    "我在等一个东西（I/O、定时器、channel...），                  │
+│     等好了再叫我（通过 Waker）"                                │
+│    → Future 不在就绪队列，只有 Waker 触发后才会被重新 poll       │
+│    → 类似于"我在等快递，到了打电话叫我"                          │
+│                                                              │
+│  更准确的类比：                                                │
+│    .await ≈ 操作系统的 阻塞式 I/O 等待（进程进入 BLOCKED 状态） │
+│    而不是简单的 yield（进程仍在 READY 状态）                    │
+└──────────────────────────────────────────────────────────────┘
+```
+
+| 操作 | 进程状态 | 何时恢复 | 类比 |
+|------|---------|---------|------|
+| `sched_yield()` | READY（仍在就绪队列） | 下一次调度就可能恢复 | "我不忙，你先用" |
+| 阻塞 I/O（`read()`） | BLOCKED（离开就绪队列） | I/O 完成中断后才恢复 | "我在等数据，好了叫我" |
+| Rust `.await` | Pending（离开就绪队列） | `Waker::wake()` 后才恢复 | **和阻塞 I/O 更像** |
+
+### 5.6 完整的 `.await` 执行流程（对照操作系统）
+
+以 `sleep(Duration::from_millis(300)).await` 为例：
+
+```
+步骤    操作系统进程                              Rust async
+────    ──────────────────────                   ──────────────────────
+ 1      进程调用 read() 系统调用                   调度器调用 Future::poll()
+ 2      内核发现数据未就绪                         sleep 内部检查：时间没到
+ 3      内核将进程状态设为 BLOCKED                  poll() 向 reactor 注册定时器 + Waker
+ 4      内核将进程从就绪队列移除                    poll() 返回 Poll::Pending
+ 5      调度器选择下一个 READY 进程执行             调度器选择下一个就绪的 Future 执行
+ 6      (...其他进程在运行...)                     (...其他 Future 在被 poll...)
+ 7      硬件中断：数据到达                         epoll/kqueue 通知：定时器到期
+ 8      中断处理程序将进程状态改为 READY             reactor 调用 Waker::wake()
+ 9      进程被放回就绪队列                         Future 被放回调度器的就绪队列
+10      调度器选中该进程，恢复执行                  调度器再次调用 poll()
+11      read() 系统调用返回数据                    poll() 返回 Poll::Ready(())
+12      进程继续执行 read() 之后的代码              .await 之后的代码继续执行
+```
+
+### 5.7 为什么说 Rust async 是"用户态的操作系统"
+
+tokio runtime 本质上就是一个**用户态的微型操作系统**：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Linux 内核                                    │
+│                                                                 │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                      │
+│  │ 进程调度器 │  │ I/O 子系统│  │ 定时器管理│                      │
+│  │ (CFS)    │  │ (epoll)  │  │ (hrtimer)│                      │
+│  └──────────┘  └──────────┘  └──────────┘                      │
+│  管理对象：进程/线程（PCB）                                       │
+│  切换方式：保存/恢复寄存器 + 栈指针                                │
+│  切换开销：~1-10μs（涉及内核态切换）                               │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    Tokio Runtime（用户态）                        │
+│                                                                 │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                      │
+│  │ 任务调度器 │  │ I/O reactor│ │ 时间轮    │                      │
+│  │ (work-   │  │ (mio/    │  │ (timer   │                      │
+│  │  stealing)│  │  epoll)  │  │  wheel)  │                      │
+│  └──────────┘  └──────────┘  └──────────┘                      │
+│  管理对象：Future（状态机结构体）                                  │
+│  切换方式：poll() 返回 Pending → 调用下一个 poll()                │
+│  切换开销：~10-50ns（纯用户态函数调用）                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+| 操作系统组件 | Tokio 对应组件 | 说明 |
+|-------------|---------------|------|
+| 进程调度器 (CFS) | work-stealing 调度器 | 多线程间均衡分配任务 |
+| 进程控制块 (PCB) | Task (包装的 Future) | 保存任务状态和元数据 |
+| epoll / kqueue | mio (I/O reactor) | 监听 I/O 事件就绪 |
+| hrtimer (高精度定时器) | 时间轮 (timer wheel) | 管理 sleep/timeout |
+| 中断处理程序 | Waker 机制 | 通知调度器"任务可以继续了" |
+| 就绪队列 | 任务队列 (run queue) | 存放可以被 poll 的任务 |
+| `fork()` 创建进程 | `tokio::spawn()` 创建任务 | 提交新的并发单元 |
+| `waitpid()` 等待子进程 | `JoinHandle::await` 等待任务 | 获取并发单元的结果 |
+
+### 5.8 协作式调度的"阿喀琉斯之踵"
+
+因为 Rust async 是协作式调度，**如果一个 Future 不主动让出（不 `.await`），它会霸占整个线程**：
+
+```rust
+// ⚠️ 危险：这个 Future 永远不会让出控制权！
+async fn bad_future() {
+    loop {
+        // CPU 密集计算，没有 .await
+        heavy_computation();
+    }
+    // 其他所有 Future 都被饿死了！
+}
+
+// ✅ 正确做法：定期让出
+async fn good_future() {
+    loop {
+        heavy_computation();
+        tokio::task::yield_now().await;  // 显式让出，给其他任务机会
+    }
+}
+```
+
+这和操作系统的历史完全对应：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Windows 3.1（协作式调度）：                                      │
+│    一个程序死循环 → 整个系统卡死                                   │
+│    必须 Ctrl+Alt+Del 强制终止                                    │
+│                                                                 │
+│  Windows NT（抢占式调度）：                                       │
+│    一个程序死循环 → 只有那个程序卡，其他程序正常                     │
+│    OS 定时器中断强制切换                                          │
+│                                                                 │
+│  Rust async（协作式调度）：                                       │
+│    一个 Future 不 .await → 当前线程上的其他 Future 被饿死          │
+│    解决方案：tokio::task::yield_now().await                       │
+│    或者：tokio::spawn_blocking() 把 CPU 密集任务放到专用线程池     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 5.9 一句话总结
+
+> **`.await` ≈ 操作系统中的"发起异步 I/O + 进入 BLOCKED 状态 + 注册 I/O 完成回调"这三步的合体。**
+> 它是协作式调度中的让出点，但比简单的 `yield()` 更智能——它告诉调度器"我在等什么"以及"好了怎么叫我"。
+> 而 tokio runtime 本质上就是一个运行在用户态的微型操作系统，用 `poll()` 代替上下文切换，用 `Waker` 代替硬件中断，以 **1/100 的开销** 实现了同样的调度语义。
+
+### 5.10 GNU Pth — C 语言的用户态有栈协程鼻祖
+
+[GNU Pth (GNU Portable Threads)](https://www.gnu.org/software/pth/) 是 1999 年发布的纯 C 用户态线程库，它是理解"用户态协程"最经典的参考实现。**Rust 的 tokio 和 GNU Pth 在架构上惊人地相似——都是用户态调度器，只是一个用有栈协程，一个用无栈协程。**
+
+#### GNU Pth 的核心设计
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    GNU Pth 架构                                  │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────┐       │
+│  │              Pth 调度器 (用户态，单线程)               │       │
+│  │                                                      │       │
+│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐              │       │
+│  │  │ 协程 A  │  │ 协程 B  │  │ 协程 C  │              │       │
+│  │  │ (64KB栈)│  │ (64KB栈)│  │ (64KB栈)│              │       │
+│  │  └─────────┘  └─────────┘  └─────────┘              │       │
+│  │                                                      │       │
+│  │  调度策略：优先级 + FIFO                               │       │
+│  │  切换方式：ucontext (makecontext/swapcontext)         │       │
+│  │  I/O 处理：替换 read/write/select 为非阻塞版本        │       │
+│  └──────────────────────────────────────────────────────┘       │
+│                                                                 │
+│  关键特性：                                                      │
+│  • 纯用户态，不需要内核支持                                       │
+│  • 单线程内多协程（N:1 模型）                                     │
+│  • 通过 LD_PRELOAD 或链接替换拦截系统调用                         │
+│  • 协作式调度：必须调用 pth_yield() 或 I/O 操作才会切换           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### GNU Pth 代码示例 vs Rust async
+
+```c
+/* GNU Pth: 用户态协程 */
+#include <pth.h>
+
+void *fetch_data(void *arg) {
+    int id = *(int *)arg;
+    printf("[Task %d] Starting fetch...\n", id);
+
+    /* pth_sleep 不阻塞 OS 线程，只挂起当前 Pth 协程 */
+    /* Pth 内部：将当前协程移到等待队列，swapcontext 到调度器 */
+    pth_sleep(1);
+
+    printf("[Task %d] Fetch complete!\n", id);
+    return strdup("data");
+}
+
+int main() {
+    pth_init();  /* 初始化 Pth 调度器 —— 类似 tokio::runtime::Builder */
+
+    pth_attr_t attr = pth_attr_new();
+    pth_attr_set(attr, PTH_ATTR_STACK_SIZE, 64*1024);  /* 每协程 64KB 栈 */
+
+    /* 创建协程 —— 类似 tokio::spawn() */
+    pth_t t1 = pth_spawn(attr, fetch_data, &(int){1});
+    pth_t t2 = pth_spawn(attr, fetch_data, &(int){2});
+    pth_t t3 = pth_spawn(attr, fetch_data, &(int){3});
+
+    /* 等待协程完成 —— 类似 JoinHandle::await */
+    pth_join(t1, NULL);
+    pth_join(t2, NULL);
+    pth_join(t3, NULL);
+
+    pth_kill();  /* 销毁调度器 */
+    return 0;
+}
+```
+
+```rust
+// Rust async: 等价的代码
+#[tokio::main]  // ← 类似 pth_init() + pth_kill()
+async fn main() {
+    // tokio::spawn ← 类似 pth_spawn
+    let t1 = tokio::spawn(fetch_data(1));
+    let t2 = tokio::spawn(fetch_data(2));
+    let t3 = tokio::spawn(fetch_data(3));
+
+    // .await ← 类似 pth_join
+    t1.await.unwrap();
+    t2.await.unwrap();
+    t3.await.unwrap();
+}
+
+async fn fetch_data(id: u32) -> String {
+    println!("[Task {}] Starting fetch...", id);
+    sleep(Duration::from_secs(1)).await;  // ← 类似 pth_sleep()
+    println!("[Task {}] Fetch complete!", id);
+    format!("data")
+}
+```
+
+#### GNU Pth 的上下文切换原理（有栈）
+
+```c
+/* GNU Pth 内部使用 POSIX ucontext 实现协程切换 */
+
+/* 1. 创建协程时：分配独立的栈空间 */
+getcontext(&coroutine->ctx);
+coroutine->ctx.uc_stack.ss_sp = malloc(64 * 1024);   // 64KB 栈
+coroutine->ctx.uc_stack.ss_size = 64 * 1024;
+makecontext(&coroutine->ctx, coroutine_entry, 1, arg);
+
+/* 2. 切换协程时：保存/恢复整个 CPU 上下文 */
+swapcontext(&current->ctx, &next->ctx);
+//           ↑ 保存当前寄存器    ↑ 恢复目标寄存器
+// 包括：SP(栈指针), PC(程序计数器), 通用寄存器, 浮点寄存器...
+// 这是一个系统调用级别的操作，开销 ~200-500ns
+
+/* 3. 对比 Rust 的切换方式 */
+// Rust: poll() 返回 Pending → 调度器调用下一个 poll()
+// 就是普通的函数调用/返回，~10-50ns，编译器还能内联优化
+```
+
+#### GNU Pth 的 I/O 拦截机制
+
+GNU Pth 最巧妙的设计是**透明地替换阻塞系统调用**：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  普通程序调用 read()：                                           │
+│    程序 → read() → 内核 → 阻塞整个进程                           │
+│                                                                 │
+│  GNU Pth 拦截后：                                                │
+│    程序 → pth_read() → 设为非阻塞 → select/poll 检查             │
+│                       ↓ 数据未就绪                               │
+│                       → 挂起当前协程（swapcontext 到调度器）       │
+│                       → 调度器运行其他就绪协程                    │
+│                       → select 发现数据就绪                      │
+│                       → 恢复该协程（swapcontext 回来）            │
+│                       → read() 返回数据                          │
+│                                                                 │
+│  效果：程序代码完全不需要修改！看起来还是同步的 read()             │
+│  这就是有栈协程的最大优势：对调用者完全透明                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+这和 Go 的 netpoller 思路完全一致——**有栈协程可以在任意系统调用处透明挂起**，调用者不需要写 `async/await`。
+
+#### GNU Pth vs Rust async 关键对比
+
+| 维度 | GNU Pth (1999) | Rust async (2019) |
+|------|----------------|-------------------|
+| **语言** | C | Rust |
+| **协程类型** | 有栈（ucontext） | 无栈（状态机） |
+| **线程模型** | N:1（所有协程在一个 OS 线程） | M:N（tokio 多线程 work-stealing） |
+| **栈内存** | 每协程 64KB（可配置） | **无栈，几十~几百字节** |
+| **万级协程内存** | 10000 × 64KB = **640MB** | 10000 × 64B ≈ **0.6MB** |
+| **切换机制** | `swapcontext()`（保存/恢复寄存器） | `poll()` 返回 Pending（普通函数返回） |
+| **切换开销** | ~200-500ns | **~10-50ns** |
+| **I/O 处理** | 拦截系统调用，透明替换 | 显式 `.await`，编译器知道挂起点 |
+| **函数染色** | **无** ✅（普通函数就行） | 有（必须 async/await） |
+| **类型安全** | 无（void* 传参） | **编译期保证** ✅ |
+| **自动取消** | 无（需手动 pth_cancel） | **有**（Future drop 自动取消） ✅ |
+| **多核利用** | ❌ 单线程 | ✅ 多线程 work-stealing |
+| **可移植性** | 依赖 ucontext（POSIX） | 跨平台（编译器生成状态机） |
+
+#### GNU Pth 的历史意义
+
+```
+时间线：用户态并发的演进
+
+1999  GNU Pth        ← 纯 C 用户态有栈协程，证明了"不需要内核也能并发"
+2004  Lua coroutine  ← 脚本语言中的有栈协程
+2007  Erlang OTP     ← BEAM VM 轻量级进程，百万级并发
+2009  Go goroutine   ← GNU Pth 思想的现代化：有栈协程 + 多线程 + GC
+2012  Node.js        ← 事件循环 + 回调（callback hell）
+2015  JS async/await ← 无栈协程语法糖，解决回调地狱
+2017  Kotlin suspend ← JVM 上的无栈协程
+2019  Rust async     ← 零成本无栈协程，编译期安全保证
+2020  C++20 co_await ← C++ 终于有了协程（但语法复杂）
+
+GNU Pth 是这条演进线上的"开山鼻祖"之一。
+Rust async 可以看作是 GNU Pth 思想的"终极进化"：
+  • 同样是用户态调度 ✅
+  • 但从有栈变成无栈（内存效率提升 1000 倍）
+  • 从单线程变成多线程（充分利用多核）
+  • 从运行时安全变成编译期安全
+```
+
+> **一句话总结**：GNU Pth 证明了"用户态协程"的可行性，Rust async 则把这个思想推到了极致——用编译期状态机替代运行时栈切换，用所有权系统替代手动资源管理，实现了真正的"零成本用户态并发"。
+
+---
+
+### 5.11 TypeScript async/await — 事件循环上的无栈协程
+
+TypeScript/JavaScript 的 async/await 和 Rust 的 async/await **语法极其相似，但底层机制完全不同**。理解这个差异，能帮你更深刻地理解 Rust 的设计选择。
+
+#### TypeScript async 的本质
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              TypeScript/JavaScript 异步模型                       │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────┐       │
+│  │              事件循环 (Event Loop)                     │       │
+│  │                                                      │       │
+│  │  ┌─────────────────────────────────────────────┐     │       │
+│  │  │  调用栈 (Call Stack) — 单线程，同一时刻只跑一个  │     │       │
+│  │  └─────────────────────────────────────────────┘     │       │
+│  │       ↕                                              │       │
+│  │  ┌─────────────────────────────────────────────┐     │       │
+│  │  │  微任务队列 (Microtask Queue)                │     │       │
+│  │  │  Promise.then / await 恢复点在这里排队        │     │       │
+│  │  └─────────────────────────────────────────────┘     │       │
+│  │       ↕                                              │       │
+│  │  ┌─────────────────────────────────────────────┐     │       │
+│  │  │  宏任务队列 (Macrotask Queue)                │     │       │
+│  │  │  setTimeout / setInterval / I/O 回调         │     │       │
+│  │  └─────────────────────────────────────────────┘     │       │
+│  └──────────────────────────────────────────────────────┘       │
+│                                                                 │
+│  底层 I/O：libuv (Node.js) / 浏览器 API                         │
+│  线程模型：主线程单线程 + I/O 线程池（libuv 内部）                │
+│  GC：V8 垃圾回收器                                               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 代码对比：TypeScript vs Rust
+
+```typescript
+// TypeScript: async/await
+async function fetchData(id: number): Promise<string> {
+    console.log(`  [Task ${id}] Starting fetch...`);
+    await sleep(100 * id);  // ← 挂起，让出给事件循环
+    console.log(`  [Task ${id}] Fetch complete!`);
+    return `Data from task ${id}`;
+}
+
+// 并发执行
+async function concurrentDemo() {
+    const [a, b, c] = await Promise.all([
+        fetchData(1),   // ← 类似 tokio::join!
+        fetchData(2),
+        fetchData(3),
+    ]);
+    console.log(a, b, c);
+}
+
+// 竞速
+async function raceDemo() {
+    const winner = await Promise.race([
+        slowOperation(),   // ← 类似 tokio::select!
+        fastOperation(),
+    ]);
+    // ⚠️ 但是！输掉的 Promise 还在跑！不会自动取消！
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+```
+
+```rust
+// Rust: 几乎一样的语法
+async fn fetch_data(id: u32) -> String {
+    println!("  [Task {}] Starting fetch...", id);
+    sleep(Duration::from_millis(100 * id as u64)).await;
+    println!("  [Task {}] Fetch complete!", id);
+    format!("Data from task {}", id)
+}
+
+// 并发执行
+async fn concurrent_demo() {
+    let (a, b, c) = tokio::join!(
+        fetch_data(1),
+        fetch_data(2),
+        fetch_data(3),
+    );
+    println!("{} {} {}", a, b, c);
+}
+
+// 竞速
+async fn race_demo() {
+    let winner = tokio::select! {
+        val = slow_operation() => val,
+        val = fast_operation() => val,
+    };
+    // ✅ 输掉的 Future 被 drop，自动取消，资源自动释放！
+}
+```
+
+#### 关键差异深度解析
+
+**1. 执行模型：单线程 vs 多线程**
+
+```
+TypeScript (Node.js):
+  ┌──────────────────────────────────────┐
+  │  主线程 (V8)                          │
+  │  ┌──────┐ ┌──────┐ ┌──────┐         │
+  │  │Task A│→│Task B│→│Task C│→ ...    │  ← 永远只有一个在跑
+  │  └──────┘ └──────┘ └──────┘         │
+  │  事件循环依次执行微任务               │
+  └──────────────────────────────────────┘
+  I/O 在 libuv 线程池中并行，但 JS 代码永远单线程
+
+Rust (tokio, multi-thread):
+  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+  │  Worker 线程1 │ │  Worker 线程2 │ │  Worker 线程3 │
+  │  ┌──────┐    │ │  ┌──────┐    │ │  ┌──────┐    │
+  │  │Task A│    │ │  │Task B│    │ │  │Task C│    │
+  │  └──────┘    │ │  └──────┘    │ │  └──────┘    │
+  └──────────────┘ └──────────────┘ └──────────────┘
+  多个 Future 可以真正并行执行（在不同 CPU 核心上）
+```
+
+**2. 惰性 vs 急切**
+
+```typescript
+// TypeScript: Promise 创建时就立即开始执行！（急切求值）
+const promise = fetchData(1);  // ← 已经开始执行了！
+// 即使你不 await 它，fetchData 的代码也在跑
+
+console.log("doing other things...");
+const result = await promise;  // ← 只是等待已经在跑的任务
+```
+
+```rust
+// Rust: Future 创建时什么都不做！（惰性求值）
+let future = fetch_data(1);  // ← 什么都没发生！只是创建了一个状态机
+// fetch_data 的代码一行都没执行
+
+println!("doing other things...");
+let result = future.await;  // ← 现在才开始执行！
+```
+
+```
+这是一个根本性的设计差异：
+
+TypeScript Promise:  创建 = 开始执行（急切）
+                     await = 等待已经在跑的结果
+
+Rust Future:         创建 = 只是构造状态机（惰性）
+                     .await = 开始执行 + 等待结果
+
+Rust 的惰性设计使得 Future 可以被组合、存储、传递，
+在 .await 之前不消耗任何资源。
+TypeScript 的 Promise 一旦创建就无法"暂停"或"取消"。
+```
+
+**3. 取消机制：Rust 的杀手优势**
+
+```typescript
+// TypeScript: Promise 一旦创建就无法取消！
+const controller = new AbortController();  // 需要手动创建
+const promise = fetch(url, { signal: controller.signal });  // 需要手动传递
+
+// 想取消？
+controller.abort();  // 需要手动调用
+// 而且不是所有 API 都支持 AbortController！
+// 忘记取消 = 资源泄漏（网络连接、定时器...）
+```
+
+```rust
+// Rust: drop Future = 自动取消一切
+{
+    let future = fetch_data(1);
+    // future 在这里被 drop
+}  // ← 自动取消！所有资源自动释放！
+   // 不需要 AbortController，不需要手动清理
+   // 编译器保证，零成本
+```
+
+**4. 内存管理**
+
+```
+TypeScript:
+  • Promise 对象在堆上分配，由 V8 GC 管理
+  • 闭包捕获的变量也在堆上
+  • GC 停顿：通常 1-10ms（V8 增量 GC）
+  • 内存开销：每个 Promise ~100-200 bytes + 闭包 + GC 元数据
+
+Rust:
+  • Future 是编译器生成的 enum，大小编译期确定
+  • 可以在栈上分配（tokio::join! 内的 Future）
+  • 无 GC：确定性析构，延迟可预测
+  • 内存开销：每个 Future ~几十到几百 bytes，精确到字节
+```
+
+#### TypeScript vs Rust async 完整对比表
+
+| 维度 | TypeScript async/await | Rust async/await |
+|------|----------------------|------------------|
+| **底层机制** | 事件循环 + 微任务队列 | 状态机 + poll + Waker |
+| **线程模型** | **单线程** (JS 代码) | **多线程** (work-stealing) |
+| **求值策略** | **急切** (Promise 立即执行) | **惰性** (Future 不 await 不执行) |
+| **取消机制** | 手动 AbortController（不通用） | **自动** (drop = cancel) ✅ |
+| **内存管理** | GC (V8) | **无 GC**，确定性析构 ✅ |
+| **类型安全** | 有 (TypeScript 类型系统) | **更强** (Send/Sync/lifetime) |
+| **函数染色** | 有 (async/await) | 有 (async/await) |
+| **错误处理** | try/catch + Promise.reject | Result<T, E> + ? 操作符 |
+| **并发原语** | Promise.all / Promise.race | join! / select! / spawn |
+| **CPU 密集任务** | 阻塞事件循环 ❌ | spawn_blocking / 多线程 ✅ |
+| **适用场景** | I/O 密集型 Web 服务 | I/O + CPU 密集型系统服务 |
+| **学习曲线** | **平缓** ✅ | 陡峭（Pin, lifetime, Send...） |
+| **生态成熟度** | **极其成熟** (npm) | 快速成长 (crates.io) |
+
+#### TypeScript 的 async/await 编译产物
+
+TypeScript 的 async/await 在编译（或运行时）也会被转换，但方式和 Rust 完全不同：
+
+```typescript
+// 你写的代码：
+async function fetchData(id: number): Promise<string> {
+    console.log("Starting...");
+    await sleep(100);
+    console.log("Done!");
+    return `Data ${id}`;
+}
+
+// V8 引擎大致的处理方式（简化）：
+function fetchData(id: number): Promise<string> {
+    return new Promise((resolve, reject) => {
+        console.log("Starting...");
+        sleep(100).then(() => {           // ← 回调链！
+            console.log("Done!");
+            resolve(`Data ${id}`);
+        }).catch(reject);
+    });
+}
+// 本质：async/await 是 Promise 链的语法糖
+// 每个 await 变成一个 .then() 回调
+// 状态保存在闭包中（堆分配）
+```
+
+```rust
+// Rust 编译器的处理方式（简化）：
+enum FetchDataFuture {
+    State0 { id: u32 },
+    State1 { id: u32, sleep_fut: SleepFuture },
+    Done,
+}
+// 本质：async/await 是状态机的语法糖
+// 每个 .await 变成一个状态转换
+// 状态保存在 enum 字段中（可栈分配，大小编译期确定）
+```
+
+```
+对比：
+  TypeScript: async → Promise 链 → 闭包（堆分配，GC 管理）
+  Rust:       async → 状态机 enum → 结构体字段（栈分配，零开销）
+
+  TypeScript 的 await 恢复 = 事件循环从微任务队列取出回调并执行
+  Rust 的 .await 恢复 = 调度器再次调用 poll()，match 到正确的状态分支
+```
+
+#### 什么时候选 TypeScript，什么时候选 Rust？
+
+| 场景 | 推荐 | 原因 |
+|------|------|------|
+| Web 前端 | TypeScript ✅ | 浏览器原生支持，生态无敌 |
+| REST API / BFF | TypeScript ✅ | 开发速度快，前后端同构 |
+| 实时通信 (WebSocket) | 都行 | TS 简单，Rust 性能更好 |
+| 高并发网关/代理 | Rust ✅ | 无 GC 停顿，内存精确控制 |
+| 流式数据处理 | Rust ✅ | 背压控制、内存安全 |
+| Serverless 函数 | TypeScript ✅ | 冷启动快，生态丰富 |
+| 嵌入式 / IoT | Rust ✅ | 无运行时，可裸机运行 |
+| CLI 工具 | 都行 | TS 用 Bun/Deno，Rust 二进制更小 |
+
+> **一句话总结**：TypeScript 的 async/await 是"事件循环上的语法糖"——简单、易用、生态丰富，但受限于单线程和 GC；Rust 的 async/await 是"编译器生成的零成本状态机"——更快、更省内存、更安全，但学习曲线更陡。**它们语法相似，灵魂不同。**
+
+---
+
+### 5.12 六种并发模型全景对比
+
+将 GNU Pth 和 TypeScript 加入后，我们可以画出一张完整的并发模型全景图：
+
+```
+                    内存效率 →
+                    低                                    高
+                    ┌─────────────────────────────────────────┐
+         高        │                                         │
+          ↑        │  C++ std::thread                        │
+          │        │  (8MB/线程, 内核调度)                     │
+          │        │                                         │
+     透明度        │          GNU Pth                         │
+    (无需特殊      │          (64KB/协程, 用户态)              │
+     语法)         │                                         │
+          │        │                  Go goroutine            │
+          │        │                  (2KB/协程, 多线程)       │
+          │        │                                         │
+          │        │                  Erlang process          │
+          │        │                  (2KB/进程, BEAM VM)     │
+          │        │                                         │
+         低        │      TypeScript          Rust async     │
+                   │      Promise             Future         │
+                   │      (~200B, 事件循环)    (~64B, 多线程)  │
+                   └─────────────────────────────────────────┘
+                   单线程 ←──── 并行能力 ────→ 多线程
+
+  纵轴：透明度（是否需要 async/await 语法）
+  横轴：内存效率（每个并发单元的开销）
+  气泡大小：并行能力（能否利用多核）
+```
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                    并发模型演进路线                                     │
+│                                                                      │
+│  OS 线程 (C++)                                                       │
+│    │                                                                 │
+│    ├──→ 用户态有栈协程 (GNU Pth, 1999)                                │
+│    │      │                                                          │
+│    │      ├──→ 多线程有栈协程 (Go goroutine, 2009)                    │
+│    │      │                                                          │
+│    │      └──→ VM 管理的轻量进程 (Erlang, 2007 OTP)                   │
+│    │                                                                 │
+│    └──→ 事件循环 + 回调 (Node.js, 2009)                               │
+│           │                                                          │
+│           ├──→ Promise + async/await (JS/TS, 2015/2017)              │
+│           │                                                          │
+│           └──→ 编译期状态机 (Rust async, 2019)                        │
+│                                                                      │
+│  两条路线的哲学：                                                      │
+│    有栈路线：运行时做更多（栈管理、透明挂起）→ 更易用                    │
+│    无栈路线：编译器做更多（状态机生成、类型检查）→ 更高效                 │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+| | C++ 线程 | GNU Pth | Go | Erlang | TypeScript | **Rust** |
+|---|---|---|---|---|---|---|
+| **年代** | ~1995 | 1999 | 2009 | 2007 | 2015 | 2019 |
+| **协程类型** | 无（OS线程） | 有栈 | 有栈 | 有栈(VM) | 无栈 | **无栈** |
+| **每单元内存** | ~8MB | ~64KB | ~2KB | ~2KB | ~200B | **~64B** |
+| **百万并发内存** | 8TB ❌ | 64GB ❌ | 2GB | 2GB | 200MB | **64MB** ✅ |
+| **多核利用** | ✅ | ❌ | ✅ | ✅ | ❌ | ✅ |
+| **GC** | 无 | 无 | 有 | 有 | 有(V8) | **无** ✅ |
+| **自动取消** | ❌ | ❌ | ❌ | ❌ | ❌ | **✅** |
+| **编译期安全** | ❌ | ❌ | ❌ | ❌ | 部分(TS) | **✅** |
+| **函数染色** | 有 | **无** | **无** | **无** | 有 | 有 |
+| **学习曲线** | 陡 | 中 | **平** | 中 | **平** | 陡 |
+
+> **最终总结**：从 GNU Pth (1999) 到 Rust async (2019)，20 年的演进路线清晰可见——**用户态并发的思想不变，实现方式从"运行时栈切换"进化到"编译期状态机生成"**。GNU Pth 证明了用户态调度的可行性，Go 让它变得简单易用，TypeScript 让它走进了 Web 开发者的日常，而 Rust 则把它推到了性能和安全的极致。
