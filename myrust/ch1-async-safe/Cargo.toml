@@ -5,3 +5,25 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+
+# Run individual examples:
+#   cargo run --bin async_basic
+#   cargo run --bin async_shared_counter
+#   cargo run --bin async_channel
+#   cargo run --bin async_rwlock
+
+[[bin]]
+name = "async_basic"
+path = "src/async_basic.rs"
+
+[[bin]]
+name = "async_shared_counter"
+path = "src/async_shared_counter.rs"
+
+[[bin]]
+name = "async_channel"
+path = "src/async_channel.rs"
+
+[[bin]]
+name = "async_rwlock"
+path = "src/async_rwlock.rs"
