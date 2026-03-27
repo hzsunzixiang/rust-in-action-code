@@ -15,6 +15,10 @@ hello
 *.hir
 *.expanded.rs
 
+# Temporary files
+*.tmp
+src.tmp/
+
 # macOS
 .DS_Store
 

@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rust WebAssembly Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        h1 {
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 30px;
+            color: #f97316;
+            text-shadow: 0 0 20px rgba(249, 115, 22, 0.3);
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+        }
+
+        .card h2 {
+            color: #60a5fa;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+        }
+
+        .card p {
+            color: #9ca3af;
+            margin-bottom: 12px;
+            line-height: 1.6;
+        }
+
+        input, button {
+            padding: 10px 16px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            font-size: 14px;
+            outline: none;
+        }
+
+        input {
+            background: rgba(255, 255, 255, 0.08);
+            color: #e0e0e0;
+            width: 200px;
+            margin-right: 10px;
+        }
+
+        input::placeholder {
+            color: #6b7280;
+        }
+
+        button {
+            background: linear-gradient(135deg, #f97316, #ea580c);
+            color: white;
+            cursor: pointer;
+            border: none;
+            font-weight: 600;
+            transition: opacity 0.2s;
+        }
+
+        button:hover {
+            opacity: 0.85;
+        }
+
+        .result {
+            margin-top: 12px;
+            padding: 12px 16px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            color: #34d399;
+            min-height: 20px;
+            word-break: break-all;
+        }
+
+        canvas {
+            display: block;
+            margin: 15px auto;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .list-item {
+            padding: 8px 12px;
+            margin: 4px 0;
+            background: rgba(249, 115, 22, 0.1);
+            border-left: 3px solid #f97316;
+            border-radius: 0 6px 6px 0;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-20px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        .row {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        #loading {
+            text-align: center;
+            font-size: 1.5em;
+            color: #f97316;
+            padding: 60px;
+        }
+
+        #app { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🦀 Rust WebAssembly Demo</h1>
+
+        <div id="loading">Loading WASM module...</div>
+
+        <div id="app">
+            <!-- Example 1: Greeting -->
+            <div class="card">
+                <h2>📝 Example 1: Greeting</h2>
+                <p>Call a Rust function that returns a greeting string.</p>
+                <div class="row">
+                    <input type="text" id="greet-input" placeholder="Enter your name" value="World">
+                    <button onclick="runGreet()">Greet</button>
+                </div>
+                <div class="result" id="greet-result"></div>
+            </div>
+
+            <!-- Example 2: Fibonacci -->
+            <div class="card">
+                <h2>🔢 Example 2: Fibonacci</h2>
+                <p>Calculate Fibonacci numbers using Rust's efficient iterative algorithm.</p>
+                <div class="row">
+                    <input type="number" id="fib-input" placeholder="Enter n (0-93)" value="10" min="0" max="93">
+                    <button onclick="runFibonacci()">Calculate</button>
+                </div>
+                <div class="result" id="fib-result"></div>
+            </div>
+
+            <!-- Example 3: Canvas Drawing -->
+            <div class="card">
+                <h2>🎨 Example 3: Canvas Drawing</h2>
+                <p>Rust draws colorful patterns directly on an HTML Canvas via web-sys.</p>
+                <button onclick="runDraw()">Draw Pattern</button>
+                <canvas id="demo-canvas" width="400" height="400"></canvas>
+            </div>
+
+            <!-- Example 4: DOM Manipulation -->
+            <div class="card">
+                <h2>📋 Example 4: DOM Manipulation</h2>
+                <p>Rust creates and appends DOM elements dynamically.</p>
+                <div class="row">
+                    <input type="text" id="item-input" placeholder="Enter item text" value="Hello from Rust">
+                    <button onclick="runAddItem()">Add Item</button>
+                </div>
+                <div id="item-list" style="margin-top: 12px;"></div>
+            </div>
+
+            <!-- Example 5: Array Sorting -->
+            <div class="card">
+                <h2>📊 Example 5: Array Sorting</h2>
+                <p>Pass a comma-separated list of numbers to Rust for sorting.</p>
+                <div class="row">
+                    <input type="text" id="sort-input" placeholder="e.g. 5,3,8,1,9" value="42, 7, 13, 99, 1, 56, 23, 8" style="width: 300px;">
+                    <button onclick="runSort()">Sort</button>
+                </div>
+                <div class="result" id="sort-result"></div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { greet, fibonacci, draw_pattern, add_item_to_list, sort_numbers } from './pkg/rust_wasm_demo.js';
+
+        async function main() {
+            await init();
+
+            // Hide loading, show app
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('app').style.display = 'block';
+
+            // Expose functions to global scope for onclick handlers
+            window.runGreet = () => {
+                const name = document.getElementById('greet-input').value || 'World';
+                document.getElementById('greet-result').textContent = greet(name);
+            };
+
+            window.runFibonacci = () => {
+                const n = parseInt(document.getElementById('fib-input').value) || 0;
+                const clamped = Math.min(Math.max(n, 0), 93);
+                const start = performance.now();
+                const result = fibonacci(clamped);
+                const elapsed = (performance.now() - start).toFixed(3);
+                document.getElementById('fib-result').textContent =
+                    `fibonacci(${clamped}) = ${result}  (${elapsed} ms)`;
+            };
+
+            window.runDraw = () => {
+                draw_pattern('demo-canvas');
+            };
+
+            window.runAddItem = () => {
+                const text = document.getElementById('item-input').value || 'New Item';
+                add_item_to_list('item-list', text);
+            };
+
+            window.runSort = () => {
+                const input = document.getElementById('sort-input').value;
+                const result = sort_numbers(input);
+                document.getElementById('sort-result').textContent = result;
+            };
+
+            // Auto-run greeting and draw on load
+            window.runGreet();
+            window.runDraw();
+        }
+
+        main().catch(console.error);
+    </script>
+</body>
+</html>

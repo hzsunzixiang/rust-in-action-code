@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>C++ WebAssembly Demo</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Menlo', 'Consolas', monospace;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            padding: 2rem;
+        }
+        h1 { color: #00d4ff; margin-bottom: 1rem; }
+        h2 { color: #ff6b6b; margin: 1.5rem 0 0.5rem; font-size: 1.1rem; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .section {
+            background: #16213e;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            padding: 1rem 1.5rem;
+            margin-bottom: 1rem;
+        }
+        .result {
+            background: #0a0a1a;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            margin: 0.5rem 0;
+            font-size: 0.95rem;
+        }
+        .ok { color: #4ade80; }
+        .val { color: #fbbf24; }
+        .time { color: #a78bfa; }
+        button {
+            background: #0f3460;
+            color: #00d4ff;
+            border: 1px solid #00d4ff;
+            padding: 0.4rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            margin: 0.3rem 0.3rem 0.3rem 0;
+        }
+        button:hover { background: #00d4ff; color: #1a1a2e; }
+        input {
+            background: #0a0a1a;
+            color: #e0e0e0;
+            border: 1px solid #0f3460;
+            padding: 0.4rem 0.8rem;
+            border-radius: 4px;
+            font-family: inherit;
+            width: 120px;
+        }
+        #log {
+            background: #0a0a1a;
+            padding: 1rem;
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 0.85rem;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>🔧 C++ → WebAssembly Demo</h1>
+    <p style="color:#888; margin-bottom:1rem;">Compiled with Emscripten (emcc). All computation runs in WASM.</p>
+
+    <!-- Arithmetic -->
+    <div class="section">
+        <h2>➕ Arithmetic</h2>
+        <div>
+            <input id="a" type="number" value="42" />
+            <input id="b" type="number" value="58" />
+            <button onclick="runAdd()">add(a, b)</button>
+            <button onclick="runMul()">multiply(a, b)</button>
+        </div>
+        <div id="arith-result" class="result">Click a button above...</div>
+    </div>
+
+    <!-- Fibonacci -->
+    <div class="section">
+        <h2>🌀 Fibonacci</h2>
+        <div>
+            <input id="fib-n" type="number" value="35" />
+            <button onclick="runFib()">fibonacci(n)</button>
+        </div>
+        <div id="fib-result" class="result">Try n=35 to feel the recursion...</div>
+    </div>
+
+    <!-- Prime counting -->
+    <div class="section">
+        <h2>🔢 Prime Counting</h2>
+        <div>
+            <input id="prime-n" type="number" value="100000" />
+            <button onclick="runPrimes()">count_primes(n)</button>
+            <button onclick="runIsPrime()">is_prime(n)</button>
+        </div>
+        <div id="prime-result" class="result">Count primes up to N...</div>
+    </div>
+
+    <!-- String reverse -->
+    <div class="section">
+        <h2>🔤 String Reverse (shared memory)</h2>
+        <div>
+            <input id="str-input" type="text" value="Hello, WASM!" style="width:200px" />
+            <button onclick="runReverse()">reverse_string</button>
+        </div>
+        <div id="str-result" class="result">Demonstrates C++/JS memory sharing...</div>
+    </div>
+
+    <!-- Console log -->
+    <div class="section">
+        <h2>📋 Console Output</h2>
+        <div id="log"></div>
+    </div>
+</div>
+
+<script>
+    // Capture printf output from C++
+    var Module = {
+        print: function(text) { appendLog(text); },
+        printErr: function(text) { appendLog('[stderr] ' + text); },
+        onRuntimeInitialized: function() {
+            appendLog('[JS] ✅ WASM runtime initialized!');
+        }
+    };
+
+    function appendLog(msg) {
+        var el = document.getElementById('log');
+        el.textContent += msg + '\n';
+        el.scrollTop = el.scrollHeight;
+    }
+
+    function runAdd() {
+        var a = parseInt(document.getElementById('a').value);
+        var b = parseInt(document.getElementById('b').value);
+        var result = Module._add(a, b);
+        document.getElementById('arith-result').innerHTML =
+            `<span class="ok">add(${a}, ${b})</span> = <span class="val">${result}</span>`;
+    }
+
+    function runMul() {
+        var a = parseFloat(document.getElementById('a').value);
+        var b = parseFloat(document.getElementById('b').value);
+        var result = Module._multiply(a, b);
+        document.getElementById('arith-result').innerHTML =
+            `<span class="ok">multiply(${a}, ${b})</span> = <span class="val">${result}</span>`;
+    }
+
+    function runFib() {
+        var n = parseInt(document.getElementById('fib-n').value);
+        var t0 = performance.now();
+        var result = Module._fibonacci(n);
+        var dt = (performance.now() - t0).toFixed(2);
+        document.getElementById('fib-result').innerHTML =
+            `<span class="ok">fibonacci(${n})</span> = <span class="val">${result}</span> ` +
+            `<span class="time">(${dt} ms)</span>`;
+    }
+
+    function runPrimes() {
+        var n = parseInt(document.getElementById('prime-n').value);
+        var t0 = performance.now();
+        var result = Module._count_primes(n);
+        var dt = (performance.now() - t0).toFixed(2);
+        document.getElementById('prime-result').innerHTML =
+            `<span class="ok">count_primes(${n})</span> = <span class="val">${result}</span> primes ` +
+            `<span class="time">(${dt} ms)</span>`;
+    }
+
+    function runIsPrime() {
+        var n = parseInt(document.getElementById('prime-n').value);
+        var result = Module._is_prime(n);
+        document.getElementById('prime-result').innerHTML =
+            `<span class="ok">is_prime(${n})</span> = <span class="val">${result ? 'YES ✅' : 'NO ❌'}</span>`;
+    }
+
+    function runReverse() {
+        var str = document.getElementById('str-input').value;
+        // Allocate memory in WASM heap, copy string, call C++ function, read back
+        var len = Module.lengthBytesUTF8(str) + 1;
+        var ptr = Module._malloc(len);
+        Module.stringToUTF8(str, ptr, len);
+        Module._reverse_string(ptr);
+        var reversed = Module.UTF8ToString(ptr);
+        Module._free(ptr);
+        document.getElementById('str-result').innerHTML =
+            `<span class="ok">"${str}"</span> → <span class="val">"${reversed}"</span>`;
+    }
+</script>
+<!-- Emscripten-generated JS glue code (loaded after Module is defined) -->
+<script src="main.js"></script>
+</body>
+</html>
