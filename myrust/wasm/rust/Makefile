@@ -4,9 +4,9 @@
 # Configuration
 WASM_PACK := wasm-pack
 CARGO := cargo
-PORT := 8080
+PORT := 8081
 
-.PHONY: all build serve clean setup check help
+.PHONY: all build serve clean setup check help kill-port
 
 # Default target
 all: build
@@ -52,6 +52,13 @@ serve-only:
 	@python3 -m http.server $(PORT)
 
 # ---------------------------------------------------------------
+# Kill-port: Kill process occupying the server port
+# ---------------------------------------------------------------
+kill-port:
+	@echo "🔪 Killing process on port $(PORT)..."
+	@lsof -ti:$(PORT) | xargs kill -9 2>/dev/null && echo "✅ Port $(PORT) freed!" || echo "ℹ️  No process found on port $(PORT)"
+
+# ---------------------------------------------------------------
 # Check: Run cargo check and clippy
 # ---------------------------------------------------------------
 check:
@@ -93,6 +100,7 @@ help:
 	@echo "  make serve-only     Start HTTP server without rebuilding"
 	@echo "  make check          Run cargo check and clippy"
 	@echo "  make test           Run cargo tests"
+	@echo "  make kill-port      Kill process occupying port $(PORT)"
 	@echo "  make clean          Remove all build artifacts"
 	@echo "  make help           Show this help message"
 	@echo ""

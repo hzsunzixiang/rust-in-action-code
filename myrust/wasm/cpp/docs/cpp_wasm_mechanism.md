@@ -13,6 +13,7 @@
 7. [两种运行环境对比：Node.js vs 浏览器](#7-两种运行环境对比nodejs-vs-浏览器)
 8. [性能特征](#8-性能特征)
 9. [项目结构与命令速查](#9-项目结构与命令速查)
+10. [WASM 二进制格式探索](#10-wasm-二进制格式探索)
 
 ---
 
@@ -457,3 +458,237 @@ make help         # 显示帮助
 | `free_array(ptr)` | `Module._free_array(ptr)` | 释放数组 |
 | `array_sum(arr, len)` | `Module._array_sum(ptr, n)` | 数组求和 |
 | `reverse_string(str)` | `Module._reverse_string(ptr)` | 原地反转字符串 |
+
+---
+
+## 10. WASM 二进制格式探索
+
+> `.wasm` 文件是 WebAssembly 专有的二进制格式（魔数 `\0asm`），不能用传统的 `objdump`（ELF/Mach-O 格式）来分析。需要使用专门的 WASM 工具链。
+
+### 10.1 工具安装：wabt（WebAssembly Binary Toolkit）
+
+```bash
+# macOS
+brew install wabt
+
+# Linux (Ubuntu/Debian)
+apt install wabt
+
+# 或从源码编译
+git clone --recursive https://github.com/WebAssembly/wabt
+cd wabt && mkdir build && cd build && cmake .. && make
+```
+
+安装后获得以下工具集：
+
+| 工具 | 作用 | 类比传统工具 |
+|------|------|-------------|
+| `wasm2wat` | `.wasm` 二进制 → `.wat` 文本格式（反汇编） | `objdump -d` |
+| `wasm-objdump` | 查看 section 结构、导出/导入表 | `readelf -a` / `objdump -h` |
+| `wasm-validate` | 验证 `.wasm` 文件是否合法 | `file` + 校验 |
+| `wasm-stats` | 统计指令分布 | `size` |
+| `wat2wasm` | `.wat` 文本 → `.wasm` 二进制（汇编） | `as`（汇编器） |
+| `wasm-decompile` | 反编译为类 C 伪代码（可读性最好） | `ghidra` / `IDA` |
+
+### 10.2 查看整体结构：wasm-objdump
+
+**查看 section 头信息**（了解 WASM 文件由哪些段组成）：
+
+```bash
+wasm-objdump -h build/main.wasm
+```
+
+输出示例：
+
+```
+main.wasm:	file format wasm 0x1
+
+Sections:
+
+     Type start=0x0000000a end=0x000000xx (size=0x000000xx) count: N
+   Import start=0x000000xx end=0x000000xx (size=0x000000xx) count: N
+ Function start=0x000000xx end=0x000000xx (size=0x000000xx) count: N
+    Table start=0x000000xx end=0x000000xx (size=0x000000xx) count: N
+   Memory start=0x000000xx end=0x000000xx (size=0x000000xx) count: N
+   Global start=0x000000xx end=0x000000xx (size=0x000000xx) count: N
+   Export start=0x000000xx end=0x000000xx (size=0x000000xx) count: N
+     Code start=0x000000xx end=0x000000xx (size=0x000000xx) count: N
+     Data start=0x000000xx end=0x000000xx (size=0x000000xx) count: N
+```
+
+各 section 的含义：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    WASM 二进制文件结构                        │
+├──────────┬──────────────────────────────────────────────────┤
+│ 魔数+版本 │ \0asm + 0x01 (4+4 bytes)                        │
+├──────────┼──────────────────────────────────────────────────┤
+│ Type     │ 函数签名类型定义 (i32,i32)->i32 等                │
+│ Import   │ 从宿主环境(JS)导入的函数/内存/全局变量             │
+│ Function │ 函数索引 → 类型索引的映射表                       │
+│ Table    │ 间接函数调用表（函数指针）                         │
+│ Memory   │ 线性内存声明（初始大小、最大大小）                 │
+│ Global   │ 全局变量定义                                     │
+│ Export   │ 导出给宿主环境的函数/内存/全局变量                 │
+│ Code     │ 所有函数体的 WASM 字节码（最大的 section）         │
+│ Data     │ 静态数据段（字符串常量、初始化数据等）              │
+└──────────┴──────────────────────────────────────────────────┘
+```
+
+**查看详细信息**（导入/导出/内存等）：
+
+```bash
+wasm-objdump -x build/main.wasm
+```
+
+**只看导出函数列表**：
+
+```bash
+wasm-objdump -x build/main.wasm | grep -A 50 "Export"
+```
+
+### 10.3 反汇编为 WAT 文本格式：wasm2wat
+
+WAT（WebAssembly Text Format）是 WASM 二进制的人类可读文本表示，类似于汇编语言。
+
+```bash
+# 反汇编为 WAT 文件
+wasm2wat build/main.wasm -o build/main.wat
+
+# 查看内容
+cat build/main.wat
+```
+
+输出示例（以 `add` 函数为例）：
+
+```wasm
+(module
+  ;; 类型定义
+  (type (;0;) (func (param i32 i32) (result i32)))
+
+  ;; 函数实现
+  (func $add (type 0) (param i32 i32) (result i32)
+    local.get 0        ;; 将第一个参数压栈
+    local.get 1        ;; 将第二个参数压栈
+    i32.add            ;; 弹出两个值，相加，结果压栈
+  )
+
+  ;; 导出
+  (export "add" (func $add))
+
+  ;; 内存
+  (memory (;0;) 256 256)
+  ...
+)
+```
+
+**WAT 指令速查**：
+
+| WAT 指令 | 含义 | 对应 C++ |
+|----------|------|---------|
+| `local.get N` | 获取第 N 个局部变量/参数 | 读取变量 |
+| `local.set N` | 设置第 N 个局部变量 | 赋值 |
+| `i32.add` | 32位整数加法 | `a + b` |
+| `i32.mul` | 32位整数乘法 | `a * b` |
+| `i32.lt_s` | 有符号小于比较 | `a < b` |
+| `i32.eq` | 相等比较 | `a == b` |
+| `i32.load` | 从线性内存加载 32 位值 | `*(int*)ptr` |
+| `i32.store` | 向线性内存存储 32 位值 | `*(int*)ptr = val` |
+| `call $func` | 调用函数 | `func()` |
+| `br_if` | 条件跳转 | `if (...) goto` |
+| `block` / `loop` | 结构化控制流 | `{ }` / `while` |
+| `return` | 函数返回 | `return` |
+
+### 10.4 反编译为类 C 伪代码：wasm-decompile
+
+这是**可读性最好**的方式，输出接近 C 语言的伪代码：
+
+```bash
+wasm-decompile build/main.wasm -o build/main.dcmp
+cat build/main.dcmp
+```
+
+输出示例：
+
+```c
+function add(a:int, b:int):int {
+  return a + b
+}
+
+function fibonacci(n:int):int {
+  if (n <= 1) { return n }
+  return fibonacci(n - 1) + fibonacci(n - 2)
+}
+
+function is_prime(n:int):int {
+  if (n <= 1) { return 0 }
+  var i:int = 2;
+  while (i * i <= n) {
+    if (n % i == 0) { return 0 }
+    i = i + 1;
+  }
+  return 1
+}
+```
+
+### 10.5 反汇编函数体：wasm-objdump -d
+
+查看所有函数的 WASM 字节码指令：
+
+```bash
+wasm-objdump -d build/main.wasm
+```
+
+输出示例：
+
+```
+000xxx func[N] <add>:
+ 000xxx: 20 00                      | local.get 0
+ 000xxx: 20 01                      | local.get 1
+ 000xxx: 6a                         | i32.add
+ 000xxx: 0b                         | end
+```
+
+左侧是十六进制字节码，右侧是对应的 WAT 助记符。这是最底层的视角，可以看到每条指令的实际编码。
+
+### 10.6 验证 WASM 文件
+
+```bash
+wasm-validate build/main.wasm && echo "✅ Valid" || echo "❌ Invalid"
+```
+
+### 10.7 探索方式速查表
+
+| 你想看什么 | 命令 | 输出特点 |
+|-----------|------|---------|
+| 整体结构（有哪些 section、多大） | `wasm-objdump -h main.wasm` | 段名 + 偏移 + 大小 |
+| 导出/导入了哪些函数 | `wasm-objdump -x main.wasm` | 函数名 + 签名 |
+| 指令级反汇编（WASM 字节码） | `wasm2wat main.wasm -o main.wat` | S-表达式格式 |
+| 字节码 + 十六进制对照 | `wasm-objdump -d main.wasm` | hex + 助记符 |
+| 类 C 伪代码（最易读） | `wasm-decompile main.wasm -o main.dcmp` | 类 C 语法 |
+| 二进制是否合法 | `wasm-validate main.wasm` | 通过/失败 |
+
+### 10.8 为什么不能用 objdump？
+
+| 特性 | `objdump`（binutils） | `wasm-objdump`（wabt） |
+|------|----------------------|----------------------|
+| 目标格式 | ELF / Mach-O / PE / COFF | WebAssembly |
+| 魔数识别 | `\x7fELF` / `\xFE\xED\xFA\xCE` | `\0asm` |
+| 指令集 | x86 / ARM / MIPS / ... | WASM 栈式字节码 |
+| Section 结构 | `.text` / `.data` / `.bss` | Type / Import / Code / Data / ... |
+| 符号表 | `.symtab` / `.dynsym` | Export / Import section |
+
+WASM 是一种独立的虚拟 ISA（指令集架构），与原生二进制格式完全不同，因此需要专门的工具来解析。
+
+### 10.9 Makefile 中的集成命令
+
+本项目的 Makefile 已集成了常用的探索命令：
+
+```bash
+make wat          # wasm2wat → 生成 WAT 文本格式
+make inspect      # wasm-objdump -x → 查看导出函数列表
+make size         # 查看 WASM 文件大小
+```
+
+> **提示**：如果 `wabt` 未安装，上述命令会提示安装。可通过 `brew install wabt` 快速安装。
