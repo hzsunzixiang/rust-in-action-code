@@ -1,0 +1,13 @@
+[package]
+name = "rust-wasm-main"
+version = "0.1.0"
+edition = "2021"
+description = "A Rust WebAssembly demo with main() function, running via WASI"
+
+[[bin]]
+name = "rust_wasm_main"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "s"
+lto = true
