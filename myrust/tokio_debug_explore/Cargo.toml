@@ -1,0 +1,14 @@
+[package]
+name = "tokio_debug_explore"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+
+# Build with debug info for LLDB:
+#   cargo build
+#   lldb target/debug/tokio_debug_explore
+[profile.dev]
+opt-level = 0
+debug = true
