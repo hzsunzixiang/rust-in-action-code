@@ -22,7 +22,7 @@ use tokio::time::{sleep, Duration};
 // -----------------------------------------------------------------------------
 async fn fetch_data(id: u32) -> String {
     println!("  [Task {}] Starting fetch...", id);
-    sleep(Duration::from_millis(100 * id as u64)).await; // <-- yields control here
+    sleep(Duration::from_secs(5 * id as u64)).await; // <-- yields control here (5*id seconds for debugging)
     println!("  [Task {}] Fetch complete!", id);
     format!("Data from task {}", id)
 }
@@ -40,7 +40,7 @@ async fn sequential_demo() {
     let c = fetch_data(3).await;
 
     println!("  Results: {}, {}, {}", a, b, c);
-    println!("  Time: {:?} (≈600ms, because 100+200+300)\n", start.elapsed());
+    println!("  Time: {:?} (≈30s, because 5+10+15)\n", start.elapsed());
 }
 
 async fn concurrent_demo() {
@@ -55,7 +55,7 @@ async fn concurrent_demo() {
     );
 
     println!("  Results: {}, {}, {}", a, b, c);
-    println!("  Time: {:?} (≈300ms, because max(100,200,300))\n", start.elapsed());
+    println!("  Time: {:?} (≈15s, because max(5,10,15))\n", start.elapsed());
 }
 
 // -----------------------------------------------------------------------------
@@ -66,12 +66,12 @@ async fn spawn_demo() {
 
     // spawn returns a JoinHandle — you can .await it to get the result
     let handle1 = tokio::spawn(async {
-        sleep(Duration::from_millis(200)).await;
+        sleep(Duration::from_secs(10)).await; // 10s for debugging
         42 // return a value from the spawned task
     });
 
     let handle2 = tokio::spawn(async {
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_secs(15)).await; // 15s for debugging
         "hello from task" // different return type is fine
     });
 
@@ -85,12 +85,12 @@ async fn spawn_demo() {
 // 4. tokio::select! — race multiple futures, take the FIRST one
 // -----------------------------------------------------------------------------
 async fn slow_operation() -> &'static str {
-    sleep(Duration::from_millis(500)).await;
+    sleep(Duration::from_secs(30)).await; // 30s for debugging (slow)
     "slow result"
 }
 
 async fn fast_operation() -> &'static str {
-    sleep(Duration::from_millis(100)).await;
+    sleep(Duration::from_secs(15)).await; // 15s for debugging (fast)
     "fast result"
 }
 
@@ -115,7 +115,7 @@ async fn async_block_demo() {
 
     // An async block creates an anonymous Future
     let future = async {
-        sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_secs(15)).await; // 15s for debugging
         "result from async block"
     };
 
